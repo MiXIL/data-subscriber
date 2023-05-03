@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import logging
-import os
+import os, re
 import sys
 from datetime import datetime, timedelta
 from os import makedirs
@@ -10,6 +10,7 @@ from urllib.error import HTTPError
 from urllib.request import urlretrieve
 
 from subscriber import podaac_access as pa
+from subscriber import token_formatter
 
 __version__ = pa.__version__
 
@@ -31,16 +32,16 @@ def parse_cycles(cycle_input):
 
 
 def validate(args):
-    if args.search_cycles is None and args.startDate is None and args.endDate is None:
+    if args.search_cycles is None and args.startDate is None and args.endDate is None and args.granulename is None:
         raise ValueError(
-            "Error parsing command line arguments: one of [--start-date and --end-date] or [--cycles] are required")  # noqa E501
+            "Error parsing command line arguments: one of [--start-date and --end-date] or [--cycles] or [--granule-name] are required ")  # noqa E501
     if args.search_cycles is not None and args.startDate is not None:
         raise ValueError(
             "Error parsing command line arguments: only one of -sd/--start-date and --cycles are allowed")  # noqa E501
     if args.search_cycles is not None and args.endDate is not None:
         raise ValueError(
             "Error parsing command line arguments: only one of -ed/--end-date and --cycles are allowed")  # noqa E50
-    if None in [args.endDate, args.startDate] and args.search_cycles is None:
+    if None in [args.endDate, args.startDate] and args.search_cycles is None and args.granulename is None:
         raise ValueError(
             "Error parsing command line arguments: Both --start-date and --end-date must be specified")  # noqa E50
 
@@ -60,9 +61,9 @@ def create_parser():
                         help="Cycle number for determining downloads. can be repeated for multiple cycles",
                         action='append', type=int)
     parser.add_argument("-sd", "--start-date", required=False, dest="startDate",
-                        help="The ISO date time before which data should be retrieved. For Example, --start-date 2021-01-14T00:00:00Z")  # noqa E501
+                        help="The ISO date time after which data should be retrieved. For Example, --start-date 2021-01-14T00:00:00Z")  # noqa E501
     parser.add_argument("-ed", "--end-date", required=False, dest="endDate",
-                        help="The ISO date time after which data should be retrieved. For Example, --end-date 2021-01-14T00:00:00Z")  # noqa E501
+                        help="The ISO date time before which data should be retrieved. For Example, --end-date 2021-01-14T00:00:00Z")  # noqa E501
 
     # Adding optional arguments
     parser.add_argument("-f", "--force", dest="force", action="store_true", help = "Flag to force downloading files that are listed in CMR query, even if the file exists and checksum matches")  # noqa E501
@@ -86,8 +87,15 @@ def create_parser():
                         help="Flag used to shift timestamp. Units are in hours, e.g. 10 or -10.")  # noqa E501
 
     parser.add_argument("-e", "--extensions", dest="extensions",
-                        help="The extensions of products to download. Default is [.nc, .h5, .zip, .tar.gz]",
+                        help="Regexps of extensions of products to download. Default is [.nc, .h5, .zip, .tar.gz, .tiff]",
                         default=None, action='append')  # noqa E501
+
+   # Get specific granule from the search
+   # https://github.com/podaac/data-subscriber/issues/109
+    parser.add_argument("-gr", "--granule-name", dest="granulename",
+                        help="Flag to download specific granule from a collection. This parameter can only be used if you know the granule name. Only one granule name can be supplied",
+                        default=None)
+
     parser.add_argument("--process", dest="process_cmd",
                         help="Processing command to run on each downloaded file (e.g., compression). Can be specified multiple times.",
                         action='append')
@@ -100,6 +108,11 @@ def create_parser():
 
     parser.add_argument("--limit", dest="limit", default=None, type=int,
                         help="Integer limit for number of granules to download. Useful in testing. Defaults to no limit.")  # noqa E501
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="Search and identify files to download, but do not actually download them")  # noqa E501
+    parser.add_argument("--no_checksum_exist_files", dest='no_checksum_exist_files', action='store_true', help='checksum existing files')
+    parser.add_argument('--sort_ascending', dest='sort_ascending', action='store_true', default=False, help='sort data in ascending order')
+    parser.add_argument('--keyword', dest='keyword', type=str, default='', help='only download files contain this keyword')
+
 
     return parser
 
@@ -123,7 +136,7 @@ def run(args=None):
         exit(1)
 
     pa.setup_earthdata_login_auth(edl)
-    token = pa.get_token(token_url, 'podaac-subscriber', edl)
+    token = pa.get_token(token_url)
 
     provider = args.provider
     start_date_time = args.startDate
@@ -132,12 +145,14 @@ def run(args=None):
     short_name = args.collection
     extensions = args.extensions
     process_cmd = args.process_cmd
+    granule=args.granulename
     data_path = args.outputDirectory
 
     download_limit = None
     if args.limit is not None and args.limit > 0:
         download_limit = args.limit
 
+    ts_shift = None
     if args.offset:
         ts_shift = timedelta(hours=int(args.offset))
 
@@ -159,7 +174,6 @@ def run(args=None):
         cmr_cycles = search_cycles
         params = [
             ('page_size', page_size),
-            ('sort_key', "-start_date"),
             ('provider', provider),
             ('ShortName', short_name),
             ('token', token),
@@ -169,15 +183,30 @@ def run(args=None):
         if args.verbose:
             logging.info("cycles: " + str(cmr_cycles))
 
+    elif granule is not None:
+        #This line is added to strip out the extensions. Not sure if this works across the board for all collections but it seem to work on few collections that were tested.
+        cmr_granule = granule.rsplit( ".", 1 )[ 0 ]
+        params = [
+            ('page_size', page_size),
+            ('sort_key', "start_date" if args.sort_ascending else "-start_date"),
+            ('provider', provider),
+            ('ShortName', short_name),
+            ('GranuleUR[]', cmr_granule),
+            ('token', token),
+        ]
+        if args.verbose:
+            logging.info("Granule: " + str(cmr_granule))
+
     else:
         temporal_range = pa.get_temporal_range(start_date_time, end_date_time,
                                                datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa E501
         params = [
             ('page_size', page_size),
-            ('sort_key', "-start_date"),
+            ('sort_key', "start_date" if args.sort_ascending else "-start_date"),
             ('provider', provider),
             ('ShortName', short_name),
             ('temporal', temporal_range),
+            ('token', token),
         ]
         if args.verbose:
             logging.info("Temporal Range: " + temporal_range)
@@ -192,8 +221,12 @@ def run(args=None):
         results = pa.get_search_results(params, args.verbose)
     except HTTPError as e:
         if e.code == 401:
-            token = pa.refresh_token(token, 'podaac-subscriber')
-            params['token'] = token
+            token = pa.refresh_token(token)
+            # Updated: This is not always a dictionary...
+            # in fact, here it's always a list of tuples
+            for  i, p in enumerate(params) :
+                if p[1] == "token":
+                    params[i] = ("token", token)
             results = pa.get_search_results(params, args.verbose)
         else:
             raise e
@@ -221,17 +254,13 @@ def run(args=None):
 
     downloads = [item for sublist in downloads_all for item in sublist]
 
-    if len(downloads) >= page_size:
-        logging.warning("Only the most recent " + str(
-            page_size) + " granules will be downloaded; try adjusting your search criteria (suggestion: reduce time period or spatial region of search) to ensure you retrieve all granules.")
-
     # filter list based on extension
     if not extensions:
         extensions = pa.extensions
     filtered_downloads = []
     for f in downloads:
         for extension in extensions:
-            if f.lower().endswith(extension):
+            if pa.search_extension(extension, f) and (not args.keyword or args.keyword.lower() in f.lower()):
                 filtered_downloads.append(f)
 
     downloads = filtered_downloads
@@ -242,8 +271,18 @@ def run(args=None):
     logging.info("Found " + str(len(downloads)) + " total files to download")
     if download_limit:
         logging.info("Limiting downloads to " + str(args.limit) + " total files")
+
     if args.verbose:
         logging.info("Downloading files with extensions: " + str(extensions))
+
+    if args.dry_run:
+        logging.info("Dry-run option specified. Listing Downloads.")
+        for download in downloads[:download_limit]:
+            logging.info(download)
+        logging.info("Dry-run option specific. Exiting.")
+        return
+
+
 
     # NEED TO REFACTOR THIS, A LOT OF STUFF in here
     # Finish by downloading the files to the data directory in a loop.
@@ -263,12 +302,14 @@ def run(args=None):
                     cycles, data_path, f)
 
             # decide if we should actually download this file (e.g. we may already have the latest version)
-            if(exists(output_path) and not args.force and pa.checksum_does_match(output_path, checksums)):
+            if exists(output_path) and not args.force and (args.no_checksum_exist_files or pa.checksum_does_match(output_path, checksums)):
                 logging.info(str(datetime.now()) + " SKIPPED: " + f)
                 skip_cnt += 1
                 continue
+            checksum_val = checksums.get(basename(output_path))
+            pa.download_file(f, output_path, checksum_val)
+            #urlretrieve(f, output_path)
 
-            urlretrieve(f, output_path)
             pa.process_file(process_cmd, output_path, args)
             logging.info(str(datetime.now()) + " SUCCESS: " + f)
             success_cnt = success_cnt + 1
@@ -284,17 +325,27 @@ def run(args=None):
     logging.info("Downloaded Files: " + str(success_cnt))
     logging.info("Failed Files:     " + str(failure_cnt))
     logging.info("Skipped Files:    " + str(skip_cnt))
-    pa.delete_token(token_url, token)
+
+    #create citation file if success > 0
+    if success_cnt > 0:
+        try:
+            pa.create_citation_file(short_name, provider, data_path, token, args.verbose)
+        except:
+            logging.debug("Error generating citation",exc_info=True)
     logging.info("END\n\n")
 
 
 
 
 def main():
+    log_format = '[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s'
     log_level = os.environ.get('PODAAC_LOGLEVEL', 'INFO').upper()
     logging.basicConfig(stream=sys.stdout,
-                        format='[%(asctime)s] {%(filename)s:%(lineno)d} %(levelname)s - %(message)s',
+                        format=log_format,
                         level=log_level)
+
+    for handler in logging.root.handlers:
+        handler.setFormatter(token_formatter.TokenFormatter(log_format))
     logging.debug("Log level set to " + log_level)
 
     try:
@@ -305,4 +356,5 @@ def main():
 
 
 if __name__ == '__main__':
+    pa.check_for_latest()
     main()

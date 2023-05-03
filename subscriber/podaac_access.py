@@ -1,31 +1,38 @@
 import json
 import logging
 import netrc
-import subprocess
-from datetime import datetime
+import shutil
+import re
 from http.cookiejar import CookieJar
+import os
 from os import makedirs
 from os.path import isdir, basename, join, splitext
-from urllib import request
 from typing import Dict
 from urllib import request
 from urllib.error import HTTPError
+from urllib.request import urlretrieve
 import subprocess
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import hashlib
-
+from datetime import datetime
+import time
+from requests.auth import HTTPBasicAuth
+from packaging import version
+CHUNK_SIZE = 1024 * 1024  # 1 MB
 import requests
 
 import requests
 import tenacity
 from datetime import datetime
+from tqdm.auto import tqdm
 
-__version__ = "1.10.2"
-extensions = [".nc", ".h5", ".zip", ".tar.gz"]
+__version__ = "1.13.1"
+extensions = ["\\.nc", "\\.h5", "\\.zip", "\\.tar.gz", "\\.tiff"]
 edl = "urs.earthdata.nasa.gov"
 cmr = "cmr.earthdata.nasa.gov"
-token_url = "https://" + cmr + "/legacy-services/rest/tokens"
+token_url = "https://" + edl + "/api/users"
+
 
 IPAddr = "127.0.0.1"  # socket.gethostbyname(hostname)
 
@@ -85,47 +92,87 @@ def setup_earthdata_login_auth(endpoint):
     request.install_opener(opener)
 
 
+
+def get_token(url: str) -> str:
+    tokens = list_tokens(url)
+    if len(tokens) == 0 :
+        return create_token(url)
+    else:
+        return tokens[0]
+
 ###############################################################################
 # GET TOKEN FROM CMR
 ###############################################################################
-def get_token(url: str, client_id: str, endpoint: str) -> str:
+@tenacity.retry(wait=tenacity.wait_random_exponential(multiplier=1, max=60),
+                stop=tenacity.stop_after_attempt(3),
+                reraise=True,
+                retry=(tenacity.retry_if_result(lambda x: x == ''))
+                )
+def create_token(url: str) -> str:
     try:
         token: str = ''
-        username, _, password = netrc.netrc().authenticators(endpoint)
-        xml: str = """<?xml version='1.0' encoding='utf-8'?>
-        <token><username>{}</username><password>{}</password><client_id>{}</client_id>
-        <user_ip_address>{}</user_ip_address></token>""".format(username, password, client_id, IPAddr)  # noqa E501
-        headers: Dict = {'Content-Type': 'application/xml', 'Accept': 'application/json'}  # noqa E501
-        resp = requests.post(url, headers=headers, data=xml)
-        response_content: Dict = json.loads(resp.content)
-        token = response_content['token']['id']
+        username, _, password = netrc.netrc().authenticators(edl)
+        headers: Dict = {'Accept': 'application/json'}  # noqa E501
 
-    # What error is thrown here? Value Error? Request Errors?
+
+        resp = requests.post(url+"/token", headers=headers, auth=HTTPBasicAuth(username, password))
+        response_content: Dict = json.loads(resp.content)
+        if "error" in response_content:
+            if response_content["error"] == "max_token_limit":
+                logging.error("Max tokens acquired from URS. Using existing token")
+                tokens=list_tokens(url)
+                return tokens[0]
+        token = response_content['access_token']
+
+    # Add better error handling there
+    # Max tokens
+    # Wrong Username/Passsword
+    # Other
     except:  # noqa E722
-        logging.warning("Error getting the token - check user name and password")
+        logging.warning("Error getting the token - check user name and password", exc_info=True)
     return token
 
 
 ###############################################################################
 # DELETE TOKEN FROM CMR
 ###############################################################################
-def delete_token(url: str, token: str) -> None:
+def delete_token(url: str, token: str) -> bool:
     try:
-        headers: Dict = {'Content-Type': 'application/xml', 'Accept': 'application/json'}  # noqa E501
-        url = '{}/{}'.format(url, token)
-        resp = requests.request('DELETE', url, headers=headers)
-        if resp.status_code == 204:
-            logging.info("CMR token successfully deleted")
+        username, _, password = netrc.netrc().authenticators(edl)
+        headers: Dict = {'Accept': 'application/json'}
+        resp = requests.post(url+"/revoke_token",params={"token":token}, headers=headers, auth=HTTPBasicAuth(username, password))
+
+        if resp.status_code == 200:
+            logging.info("EDL token successfully deleted")
+            return True
         else:
-            logging.info("CMR token deleting failed.")
+            logging.info("EDL token deleting failed.")
+
     except:  # noqa E722
-        logging.warning("Error deleting the token")
+        logging.warning("Error deleting the token", exc_info=True)
+
+    return False
+
+def list_tokens(url: str):
+    try:
+        tokens = []
+        username, _, password = netrc.netrc().authenticators(edl)
+        headers: Dict = {'Accept': 'application/json'}  # noqa E501
+        resp = requests.get(url+"/tokens", headers=headers, auth=HTTPBasicAuth(username, password))
+        response_content = json.loads(resp.content)
+
+        for x in response_content:
+            tokens.append(x['access_token'])
+
+    except:  # noqa E722
+        logging.warning("Error getting the token - check user name and password", exc_info=True)
+    return tokens
 
 
-def refresh_token(old_token: str, client_id: str):
+def refresh_token(old_token: str):
     setup_earthdata_login_auth(edl)
-    delete_token(token_url, old_token)
-    return get_token(token_url, client_id, edl)
+    delete_token(token_url,old_token)
+    return get_token(token_url)
 
 
 def validate(args):
@@ -286,6 +333,53 @@ def get_temporal_range(start, end, now):
     raise ValueError("One of start-date or end-date must be specified.")
 
 
+def download_file(remote_file, output_path, checksum, retries=3):
+    failed = False
+    out_file_temp = f'{output_path:s}.inc'
+    for r in range(retries):
+        try:
+            with requests.get(remote_file, stream=True) as response:
+                response.raise_for_status()
+                response.raw.decode_content = True
+                file_size = int(response.headers.get('content-length', 0))
+                free_disk_space = shutil.disk_usage(os.path.dirname(output_path)).free
+                if file_size > free_disk_space:
+                    def bytes2mb(x: float) -> int: return int(x / 1024 / 1024)
+                    raise IOError(f'No enough space in the disk. file size: {bytes2mb(file_size):d} MB, free space {bytes2mb(free_disk_space):d}')
+                file_screen_name = f'...{basename(output_path)[-70:]}' if (len(out_file_temp) > 80) else out_file_temp
+                with tqdm.wrapattr(open(out_file_temp, "wb"), "write", miniters=1, total=file_size, desc=file_screen_name) as target_file:
+                    for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                        target_file.write(chunk)
+            if not checksum_file(out_file_temp, checksum):
+                raise RuntimeError(f'Checksum failed {os.path.basename(output_path)}')
+            urlretrieve(remote_file, output_path)
+        except HTTPError as e:
+            if e.code == 503:
+                logging.warning(f'Error downloading {remote_file}. Retrying download.')
+                # back off on sleep time each error...
+                time.sleep(r)
+                # range is exclusive, so range(3): 0,1,2 so retries will
+                # never be >= 3; need to subtract 1 (doh)
+                if r >= retries-1:
+                    failed = True
+        except RuntimeError as e:
+            logging.warning(f'Checksum failed {remote_file}. Retrying download.')
+            # back off on sleep time each error...
+            time.sleep(r)
+            # range is exclusive, so range(3): 0,1,2 so retries will
+            # never be >= 3; need to subtract 1 (doh)
+            if r >= retries-1:
+                failed = True
+        else:
+            # downloaded fie without 503
+            shutil.move(out_file_temp, output_path)
+            break
+
+        if failed:
+            raise Exception("Could not download file.")
+        return output_path
+
+
 # Retry using random exponential backoff if a 500 error is raised. Maximum 10 attempts.
 @tenacity.retry(wait=tenacity.wait_random_exponential(multiplier=1, max=60),
                 stop=tenacity.stop_after_attempt(10),
@@ -393,6 +487,17 @@ def extract_checksums(granule_results):
     return checksums
 
 
+def checksum_file(file_path, checksum):
+    if not checksum:
+        return False
+
+    computed_checksum = make_checksum(file_path, checksum["Algorithm"])
+    checksums_match = computed_checksum == checksum["Value"]
+    if not checksums_match:
+        logging.warning(f'Computed checksum {computed_checksum} does not match expected checksum {checksum["Value"]}')
+    return checksums_match
+
+
 def checksum_does_match(file_path, checksums):
     """
     Checks if a file's checksum matches a checksum in the checksums dict
@@ -413,14 +518,7 @@ def checksum_does_match(file_path, checksums):
     """
     filename = basename(file_path)
     checksum = checksums.get(filename)
-    if not checksum:
-        return False
-
-    computed_checksum = make_checksum(file_path, checksum["Algorithm"])
-    checksums_match = computed_checksum == checksum["Value"]
-    if not checksums_match:
-        logging.warning(f'Computed checksum {computed_checksum} does not match expected checksum {checksum["Value"]}')
-    return checksums_match
+    return checksum_file(file_path, checksum)
 
 
 def make_checksum(file_path, algorithm):
@@ -436,3 +534,85 @@ def make_checksum(file_path, algorithm):
         for chunk in iter(lambda: f.read(4096), b""):
             hash_alg.update(chunk)
     return hash_alg.hexdigest()
+
+def get_cmr_collections(params, verbose=False):
+    query = urlencode(params)
+    url = "https://" + cmr + "/search/collections.umm_json?" + query
+    if verbose:
+        logging.info(url)
+
+    # Build the request, add the search after header to it if it's not None (e.g. after the first iteration)
+    req = Request(url)
+    response = urlopen(req)
+    result = json.loads(response.read().decode())
+    return result
+
+
+def create_citation(collection_json, access_date):
+    citation_template = "{creator}. {year}. {title}. Ver. {version}. PO.DAAC, CA, USA. Dataset accessed {access_date} at {doi_authority}/{doi}"
+
+    # Better error handling here may be needed...
+    doi = collection_json['DOI']["DOI"]
+    doi_authority = collection_json['DOI']["Authority"]
+    citation = collection_json["CollectionCitations"][0]
+    creator = citation["Creator"]
+    release_date = citation["ReleaseDate"]
+    title = citation["Title"]
+    version = citation["Version"]
+    year = datetime.strptime(release_date, "%Y-%m-%dT%H:%M:%S.000Z").year
+    return citation_template.format(creator=creator, year=year, title=title, version=version, doi_authority=doi_authority, doi=doi, access_date=access_date)
+
+def search_extension(extension, filename):
+    if re.search(extension + "$", filename) is not None:
+        return True
+    return False
+
+def create_citation_file(short_name, provider, data_path, token=None, verbose=False):
+    # get collection umm-c METADATA
+    params = [
+        ('provider', provider),
+        ('ShortName', short_name)
+    ]
+    if token is not None:
+        params.append(('token', token))
+
+    collection = get_cmr_collections(params, verbose)['items'][0]
+
+    access_date = datetime.now().strftime("%Y-%m-%d")
+
+    # create citation from umm-c metadata
+    citation = create_citation(collection['umm'], access_date)
+    # write file
+
+    with open(data_path + "/" + short_name + ".citation.txt", "w") as text_file:
+        text_file.write(citation)
+
+def get_latest_release():
+    github_url = "https://api.github.com/repos/podaac/data-subscriber/releases"
+    headers = {}
+    ghtoken = os.environ.get('GITHUB_TOKEN', None)
+    if ghtoken is not None:
+        headers = {"Authorization": "Bearer " + ghtoken}
+
+    releases_json = requests.get(github_url, headers=headers).json()
+    latest_release = get_latest_release_from_json(releases_json)
+    return latest_release
+
+def release_is_current(latest_release, this_version):
+    return  not (version.parse(this_version) < version.parse(latest_release))
+
+def get_latest_release_from_json(releases_json):
+    releases = []
+    for x in releases_json:
+        releases.append(x['tag_name'])
+    sorted(releases, key=lambda x: version.Version(x)).reverse()
+    return releases[0]
+
+
+def check_for_latest():
+    try:
+        latest_version = get_latest_release()
+        if not release_is_current(latest_version,__version__):
+            print(f'You are currently using version {__version__} of the PO.DAAC Data Subscriber/Downloader. Please run:\n\n pip install podaac-data-subscriber --upgrade \n\n to upgrade to the latest version.')
+    except:
+        print("Error checking for new version of the po.daac data subscriber. Continuing")
