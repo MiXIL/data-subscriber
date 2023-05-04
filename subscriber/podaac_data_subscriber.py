@@ -35,6 +35,9 @@ cmr = pa.cmr
 token_url = pa.token_url
 
 
+CHUNK_SIZE = 1024 * 1024  # 1 MB
+
+
 def get_update_file(data_dir, collection_name):
     if isfile(data_dir + "/.update__" + collection_name):
         return data_dir + "/.update__" + collection_name
@@ -107,9 +110,11 @@ def create_parser():
     parser.add_argument("-p", "--provider", dest="provider", default='POCLOUD',
                         help="Specify a provider for collection search. Default is POCLOUD.")  # noqa E501
     parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="Search and identify files to download, but do not actually download them")  # noqa E501
+    parser.add_argument("--no_checksum_exist_files", dest='no_checksum_exist_files', action='store_true', help='checksum existing files')
+    parser.add_argument('--sort_ascending', dest='sort_ascending', action='store_true', default=False, help='sort data in ascending order')
+    parser.add_argument('--keyword', dest='keyword', type=str, default='', help='only download files contain this keyword')
 
     return parser
-
 
 
 def run(args=None):
@@ -188,8 +193,8 @@ def run(args=None):
                                                datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa E501
 
     params = [
-        ('page_size',page_size),
-        ('sort_key', "-start_date"),
+        ('page_size', page_size),
+        ('sort_key', "start_date" if args.sort_ascending else "-start_date"),
         ('provider', provider),
         ('ShortName', short_name),
         ('updated_since', data_within_last_timestamp),
@@ -199,7 +204,7 @@ def run(args=None):
     if defined_time_range:
         params = [
             ('page_size', page_size),
-            ('sort_key', "-start_date"),
+            ('sort_key', "start_date" if args.sort_ascending else "-start_date"),
             ('provider', provider),
             ('updated_since', data_within_last_timestamp),
             ('ShortName', short_name),
@@ -264,7 +269,7 @@ def run(args=None):
     filtered_downloads = []
     for f in downloads:
         for extension in extensions:
-            if pa.search_extension(extension, f):
+            if pa.search_extension(extension, f) and (not args.keyword or args.keyword.lower() in f.lower()):
                 filtered_downloads.append(f)
 
     downloads = filtered_downloads
@@ -302,7 +307,7 @@ def run(args=None):
                     cycles, data_path, f)
 
             # decide if we should actually download this file (e.g. we may already have the latest version)
-            if(exists(output_path) and not args.force and pa.checksum_does_match(output_path, checksums)):
+            if exists(output_path) and not args.force and (args.no_checksum_exist_files or pa.checksum_does_match(output_path, checksums)):
                 logging.info(str(datetime.now()) + " SKIPPED: " + f)
                 skip_cnt += 1
                 continue

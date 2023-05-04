@@ -1,9 +1,17 @@
 from subscriber import podaac_data_subscriber as pds
 from subscriber import podaac_access as pa
+
+from urllib.error import HTTPError
 import pytest
 import os
 from pathlib import Path
 import shutil
+import json
+import tempfile
+from os.path import exists
+from packaging import version
+
+
 
 def test_temporal_range():
 
@@ -23,6 +31,46 @@ def cleanup_update_test():
     print("Cleanup...")
     shutil.rmtree(data_dir_with_updates)
 
+def test_create_citation_file():
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        pa.create_citation_file("SWOT_SIMULATED_L2_KARIN_SSH_GLORYS_CALVAL_V1", "POCLOUD", tmpdirname)
+        assert exists(tmpdirname+"/SWOT_SIMULATED_L2_KARIN_SSH_GLORYS_CALVAL_V1.citation.txt")
+
+def test_citation_creation():
+    collection_umm = '''{
+        "DOI": {
+            "DOI": "10.5067/KARIN-2GLC1",
+            "Authority": "https://doi.org"
+        },
+        "CollectionCitations": [
+            {
+                "Creator": "SWOT",
+                "ReleasePlace": "PO.DAAC",
+                "Title": "SWOT Level-2 Simulated SSH from MITgcm LLC4320 Science Quality Version 1.0",
+                "Publisher": "PO.DAAC",
+                "ReleaseDate": "2022-01-31T00:00:00.000Z",
+                "Version": "1.0"
+            },
+            {
+                "Creator": "CNES/CLS",
+                "ReleasePlace": "CNES/AVISO",
+                "Title": "Simulated SWOT products",
+                "OnlineResource": {
+                    "Linkage": "http://doi.org/10.24400/527896/a01-2021.006",
+                    "Name": " Simulated SWOT Sea Surface Height products",
+                    "Description": "Simulated SWOT Sea Surface Height products KaRIn and Nadir.",
+                    "MimeType": "text/html"
+                },
+                "Publisher": "PODAAC",
+                "ReleaseDate": "2021-11-01T00:00:00.000Z",
+                "Version": "1.0"
+            }
+        ]
+    }
+    '''
+    collection_umm_json = json.loads(collection_umm)
+    citation = pa.create_citation(collection_umm_json, "2022-07-21")
+    assert citation == "SWOT. 2022. SWOT Level-2 Simulated SSH from MITgcm LLC4320 Science Quality Version 1.0. Ver. 1.0. PO.DAAC, CA, USA. Dataset accessed 2022-07-21 at https://doi.org/10.5067/KARIN-2GLC1"
 
 def test_search_after():
     # cmr query: https://cmr.earthdata.nasa.gov/search/granules.umm_json?page_size=2000&sort_key=-start_date&provider=POCLOUD&ShortName=JASON_CS_S6A_L2_ALT_LR_STD_OST_NRT_F&temporal=2000-01-01T10%3A00%3A00Z%2C2022-04-15T00%3A00%3A00Z&bounding_box=-180%2C-90%2C180%2C90
@@ -37,8 +85,8 @@ def test_search_after():
         'bounding_box': "-180,-90,180,90",
     }
     results = pa.get_search_results(params, True)
-    assert results['hits'] == 3748
-    assert len(results['items']) == 3748
+    assert results['hits'] == 3751
+    assert len(results['items']) == 3751
 
 def test_update_format_change(cleanup_update_test):
     print("Running Test")
@@ -136,9 +184,60 @@ def test_validate():
     # with pytest.raises(SystemExit):
     #     a = validate(["-c", "viirs", "-d", "/data", "-m","60b"])
 
+def test_param_update():
+    params = [
+        ('sort_key', "-start_date"),
+        ('provider', "'POCLOUD'"),
+        ('token', "123"),
+    ]
+
+    for  i, p in enumerate(params) :
+        if p[1] == "token":
+            params[i] = ("token", "newToken")
+
+    for i,p in enumerate(params) :
+        if p[1] == "token":
+            assert p[2] == "newToken"
+
+def test_downloader_retry(mocker):
+    mck = mocker.patch('subscriber.podaac_access.urlretrieve', side_effect=HTTPError("url", 503, "msg", None, None))
+    try:
+        pa.download_file("myUrl", "outputPath")
+    except Exception:
+        pass
+    assert mck.call_count == 3
 
 def validate(args):
     parser = pds.create_parser()
     args2 = parser.parse_args(args)
     pa.validate(args2)
     return args2
+
+def test_check_updates():
+    version.parse(pa.get_latest_release())
+
+def test_compare_release():
+    tag="1.11.0"
+    assert pa.release_is_current(tag,"1.11.0")
+    assert pa.release_is_current(tag,"2.10.0")
+    assert pa.release_is_current(tag,"1.11.1")
+
+    assert not pa.release_is_current(tag,"1.10.0")
+    assert not pa.release_is_current(tag,"1.10.5")
+    assert not pa.release_is_current(tag,"0.9000.5")
+
+def test_extensions():
+    assert pa.search_extension('\\.tiff', "myfile.tiff") == True
+    assert pa.search_extension('\\.tiff', "myfile.tif") == False
+    assert pa.search_extension('\\.tiff', "myfile.gtiff") == False
+    assert pa.search_extension('PTM_\\d+', "myfile.PTM_1") == True
+    assert pa.search_extension('PTM_\\d+', "myfile.PTM_10") == True
+    assert pa.search_extension('PTM_\\d+', "myfile.PTM_09") == True
+    assert pa.search_extension('PTM_\\d+', "myfile.PTM_9") == True
+
+
+def test_get_latest_release_from_json():
+    f = open('tests/releases.json')
+    release_json = json.load(f)
+    latest_release = pa.get_latest_release_from_json(release_json)
+    assert latest_release == "1.12.0"

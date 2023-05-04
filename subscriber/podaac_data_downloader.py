@@ -8,9 +8,9 @@ from os import makedirs
 from os.path import isdir, basename, join, exists
 from urllib.error import HTTPError
 from urllib.request import urlretrieve
-
 from subscriber import podaac_access as pa
 from subscriber import token_formatter
+
 
 __version__ = pa.__version__
 
@@ -113,7 +113,6 @@ def create_parser():
     parser.add_argument('--sort_ascending', dest='sort_ascending', action='store_true', default=False, help='sort data in ascending order')
     parser.add_argument('--keyword', dest='keyword', type=str, default='', help='only download files contain this keyword')
 
-
     return parser
 
 
@@ -151,7 +150,6 @@ def run(args=None):
     download_limit = None
     if args.limit is not None and args.limit > 0:
         download_limit = args.limit
-
     ts_shift = None
     if args.offset:
         ts_shift = timedelta(hours=int(args.offset))
@@ -306,9 +304,9 @@ def run(args=None):
                 logging.info(str(datetime.now()) + " SKIPPED: " + f)
                 skip_cnt += 1
                 continue
+
             checksum_val = checksums.get(basename(output_path))
             pa.download_file(f, output_path, checksum_val)
-            #urlretrieve(f, output_path)
 
             pa.process_file(process_cmd, output_path, args)
             logging.info(str(datetime.now()) + " SUCCESS: " + f)
@@ -333,8 +331,6 @@ def run(args=None):
         except:
             logging.debug("Error generating citation",exc_info=True)
     logging.info("END\n\n")
-
-
 
 
 def main():

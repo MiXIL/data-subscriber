@@ -1,12 +1,13 @@
 import json
 import logging
 import netrc
-import shutil
 import re
+from datetime import datetime
 from http.cookiejar import CookieJar
 import os
 from os import makedirs
 from os.path import isdir, basename, join, splitext
+from urllib import request
 from typing import Dict
 from urllib import request
 from urllib.error import HTTPError
@@ -19,13 +20,12 @@ from datetime import datetime
 import time
 from requests.auth import HTTPBasicAuth
 from packaging import version
-CHUNK_SIZE = 1024 * 1024  # 1 MB
+import shutil
 import requests
-
+from tqdm.auto import tqdm
 import requests
 import tenacity
 from datetime import datetime
-from tqdm.auto import tqdm
 
 __version__ = "1.13.1"
 extensions = ["\\.nc", "\\.h5", "\\.zip", "\\.tar.gz", "\\.tiff"]
@@ -35,6 +35,7 @@ token_url = "https://" + edl + "/api/users"
 
 
 IPAddr = "127.0.0.1"  # socket.gethostbyname(hostname)
+CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 
 # ## Authentication setup
@@ -347,12 +348,11 @@ def download_file(remote_file, output_path, checksum, retries=3):
                     def bytes2mb(x: float) -> int: return int(x / 1024 / 1024)
                     raise IOError(f'No enough space in the disk. file size: {bytes2mb(file_size):d} MB, free space {bytes2mb(free_disk_space):d}')
                 file_screen_name = f'...{basename(output_path)[-70:]}' if (len(out_file_temp) > 80) else out_file_temp
-                with tqdm.wrapattr(open(out_file_temp, "wb"), "write", miniters=1, total=file_size, desc=file_screen_name) as target_file:
+                with tqdm.wrapattr(open(out_file_temp, "wb"), "write", miniters=1, total=file_size, desc=file_screen_name, leave=False) as target_file:
                     for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
                         target_file.write(chunk)
             if not checksum_file(out_file_temp, checksum):
                 raise RuntimeError(f'Checksum failed {os.path.basename(output_path)}')
-            urlretrieve(remote_file, output_path)
         except HTTPError as e:
             if e.code == 503:
                 logging.warning(f'Error downloading {remote_file}. Retrying download.')
@@ -374,10 +374,9 @@ def download_file(remote_file, output_path, checksum, retries=3):
             # downloaded fie without 503
             shutil.move(out_file_temp, output_path)
             break
-
         if failed:
             raise Exception("Could not download file.")
-        return output_path
+    return output_path
 
 
 # Retry using random exponential backoff if a 500 error is raised. Maximum 10 attempts.
@@ -490,7 +489,6 @@ def extract_checksums(granule_results):
 def checksum_file(file_path, checksum):
     if not checksum:
         return False
-
     computed_checksum = make_checksum(file_path, checksum["Algorithm"])
     checksums_match = computed_checksum == checksum["Value"]
     if not checksums_match:
