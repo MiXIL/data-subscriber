@@ -3,6 +3,48 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [1.15.2]
+### Fixed
+- Fixed bug where --subset in combination with the subscriber caused errors
+### Added
+
+## [1.15.0]
+### Added
+- Added support for Harmony subsetting
+
+## [1.14.0]
+### Added
+- Added support for wildcard search patterns in podaac-data-downloader when executed with the -gr option (i.e. search/download by CMR Granule Ur/Id). Also, added usage details to Downloader.md to describe this new feature [138](https://github.com/podaac/data-subscriber/pull/138).
+
+## 1.13.1
+### Fixed
+- Fixed an issue where a required library wasn't being included in the installation.
+
+## 1.13.0
+### Added
+- Added --dry-run option to subscriber and downloader to view the files that _would_ be downloaded without actuall downloading them. [102](https://github.com/podaac/data-subscriber/issues/102)
+- Added new feature allowing regex to be used in `--extension` `-e` options. For example using -e `PTM_\\d+` would match data files like `filename.PTM_1`, `filename.PTM_2` and `filename.PTM_10`, instead of specifying all possible combinations (`-e PTM_1, -e PTM_2, ...,  -e PMT_10`) [115](https://github.com/podaac/data-subscriber/issues/115)
+- Added check for updated version [70](https://github.com/podaac/data-subscriber/issues/70)
+- Removed CMR Token from log messages [127](https://github.com/podaac/data-subscriber/issues/127)
+
+
+## 1.12.0
+### Fixed
+- Added EDL based token downloading, removing CMR tokens [98](https://github.com/podaac/data-subscriber/issues/98),
+### Added
+- Added ability to download by filename [109](https://github.com/podaac/data-subscriber/issues/109) and additional regression testing
+
+## 1.11.0
+### Fixed
+- Fixed an issue where token-refresh was expecting a dictionary, not a list of tuples
+- Fixed issues where token was not propagated to downloader CMR query [94](https://github.com/podaac/data-subscriber/issues/94)
+- Fixed an issue with 503 errors on data download not being re-tried. [97](https://github.com/podaac/data-subscriber/issues/9797)
+- added ".tiff" to default extensions to address #[100](https://github.com/podaac/data-subscriber/issues/100)
+- removed erroneous 'warning' message on not downloading all data to close [99](https://github.com/podaac/data-subscriber/issues/99)
+- updated help documentation for start/end times to close [79](https://github.com/podaac/data-subscriber/issues/79)
+### Added
+- Added citation file creation when data are downloaded [91](https://github.com/podaac/data-subscriber/issues/91). Required some updates to the regression testing.
+
 ## [1.10.2]
 ### Fixed
 - Fixed an issue where using a default global bounding box prevented download of data that didn't use the horizontal spatial domain [87](https://github.com/podaac/data-subscriber/issues/87)

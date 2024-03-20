@@ -23,6 +23,14 @@ def test_subscriber_ecco_only_enddate():
     assert exists('./ECCO_L4_ATM_STATE_05DEG_DAILY_V4R4/1992/003/ATM_SURFACE_TEMP_HUM_WIND_PRES_day_mean_1992-01-03_ECCO_V4r4_latlon_0p50deg.nc')
     shutil.rmtree('./ECCO_L4_ATM_STATE_05DEG_DAILY_V4R4')
 
+# Test to ensure nothing is downloaded via dry-run
+@pytest.mark.regression
+def test_subscriber_ecco_dry_run():
+    args2 = create_args('-c ECCO_L4_ATM_STATE_05DEG_DAILY_V4R4 -ed 1992-01-03T00:00:00Z -d ./ECCO_L4_ATM_STATE_05DEG_DAILY_V4R4  -dydoy --dry-run'.split())
+    pds.run(args2)
+    assert len(os.listdir('./ECCO_L4_ATM_STATE_05DEG_DAILY_V4R4')) == 0 
+    shutil.rmtree('./ECCO_L4_ATM_STATE_05DEG_DAILY_V4R4')
+
 # test to download S6 data by start/stop time, and bbox, and put it in the
 # cycle based directory structure
 @pytest.mark.regression
@@ -53,7 +61,7 @@ def test_subscriber_MUR_update_file_no_redownload():
     except OSError as e:
         print("Expecting this...")
 
-    args2 = create_args('-c MUR25-JPL-L4-GLOB-v04.2 -d ./MUR25-JPL-L4-GLOB-v04.2  -sd 2020-01-01T00:00:00Z -ed 2020-01-02T00:00:00Z -dymd --offset 4'.split())
+    args2 = create_args('-c MUR25-JPL-L4-GLOB-v04.2 -d ./MUR25-JPL-L4-GLOB-v04.2  -sd 2020-01-01T00:00:00Z -ed 2020-01-02T00:00:00Z -dymd --offset 4 --verbose'.split())
     pds.run(args2)
     assert exists('./MUR25-JPL-L4-GLOB-v04.2/2020/01/01/20200101090000-JPL-L4_GHRSST-SSTfnd-MUR25-GLOB-v02.0-fv04.2.nc')
     assert exists('./MUR25-JPL-L4-GLOB-v04.2/2020/01/02/20200102090000-JPL-L4_GHRSST-SSTfnd-MUR25-GLOB-v02.0-fv04.2.nc')

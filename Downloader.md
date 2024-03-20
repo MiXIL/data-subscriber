@@ -6,7 +6,7 @@ For installation and dependency information, please see the [top-level README](R
 
 ```
 $> podaac-data-downloader -h
-usage: PO.DAAC bulk-data downloader [-h] -c COLLECTION -d OUTPUTDIRECTORY [--cycle SEARCH_CYCLES] [-sd STARTDATE] [-ed ENDDATE] [-f] [-b BBOX] [-dc] [-dydoy] [-dymd] [-dy] [--offset OFFSET] [-e EXTENSIONS] [--process PROCESS_CMD] [--version] [--verbose] [-p PROVIDER] [--limit LIMIT]
+usage: PO.DAAC bulk-data downloader [-h] -c COLLECTION -d OUTPUTDIRECTORY [--cycle SEARCH_CYCLES] [-sd STARTDATE] [-ed ENDDATE] [-f] [-b BBOX] [-dc] [-dydoy] [-dymd] [-dy] [--offset OFFSET] [-e EXTENSIONS] [-gr GRANULENAME] [--process PROCESS_CMD] [--version] [--verbose] [-p PROVIDER] [--limit LIMIT] [--dry-run]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -17,42 +17,40 @@ optional arguments:
   --cycle SEARCH_CYCLES
                         Cycle number for determining downloads. can be repeated for multiple cycles
   -sd STARTDATE, --start-date STARTDATE
-                        The ISO date time before which data should be retrieved. For Example, --start-date 2021-01-14T00:00:00Z
+                        The ISO date time after which data should be retrieved. For Example, --start-date 2021-01-14T00:00:00Z
   -ed ENDDATE, --end-date ENDDATE
-                        The ISO date time after which data should be retrieved. For Example, --end-date 2021-01-14T00:00:00Z
-   -f, --force          
-                        Flag to force downloading files that are listed in CMR query, even if the file exists and checksum matches
+                        The ISO date time before which data should be retrieved. For Example, --end-date 2021-01-14T00:00:00Z
+  -f, --force           Flag to force downloading files that are listed in CMR query, even if the file exists and checksum matches
   -b BBOX, --bounds BBOX
-                        The bounding rectangle to filter result in. Format is W Longitude,S Latitude,E Longitude,N Latitude without
-                        spaces. Due to an issue with parsing arguments, to use this command, please use the -b="-180,-90,180,90" syntax
-                        when calling from the command line. Default: "-180,-90,180,90".
+                        The bounding rectangle to filter result in. Format is W Longitude,S Latitude,E Longitude,N Latitude without spaces. Due to an issue with parsing arguments, to use this command, please use the -b="-180,-90,180,90" syntax when calling from the command line.
+                        Default: "-180,-90,180,90".
   -dc                   Flag to use cycle number for directory where data products will be downloaded.
   -dydoy                Flag to use start time (Year/DOY) of downloaded data for directory where data products will be downloaded.
-  -dymd                 Flag to use start time (Year/Month/Day) of downloaded data for directory where data products will be
-                        downloaded.
+  -dymd                 Flag to use start time (Year/Month/Day) of downloaded data for directory where data products will be downloaded.
   -dy                   Flag to use start time (Year) of downloaded data for directory where data products will be downloaded.
   --offset OFFSET       Flag used to shift timestamp. Units are in hours, e.g. 10 or -10.
   -e EXTENSIONS, --extensions EXTENSIONS
-                        The extensions of products to download. Default is [.nc, .h5, .zip, .tar.gz]
+                        Regexps of extensions of products to download. Default is [.nc, .h5, .zip, .tar.gz, .tiff]
+  -gr GRANULENAME, --granule-name GRANULENAME
+                        Flag to download specific granule from a collection. This parameter can only be used if you know the granule name. Only one granule name can be supplied. Supports wildcard search patterns allowing the user to identify multiple granules for download by using `?` for single- and `*` for multi-character expansion.
   --process PROCESS_CMD
                         Processing command to run on each downloaded file (e.g., compression). Can be specified multiple times.
   --version             Display script version information and exit.
   --verbose             Verbose mode.
   -p PROVIDER, --provider PROVIDER
                         Specify a provider for collection search. Default is POCLOUD.
-  --limit LIMIT         Integer limit for number of granules to download. Useful in testing. Defaults to 2000
+  --limit LIMIT         Integer limit for number of granules to download. Useful in testing. Defaults to no limit.
+  --dry-run             Search and identify files to download, but do not actually download them
+  --subset              Flag to enable subsetting on the specified collection 
 
 ```
-
-##Run the Script
 
 ## Step 2:  Run the Script
 
 Usage:
 ```
-usage: PO.DAAC bulk-data downloader [-h] -c COLLECTION -d OUTPUTDIRECTORY [--cycle SEARCH_CYCLES] [-sd STARTDATE] [-ed ENDDATE] [-f]
-                                    [-b BBOX] [-dc] [-dydoy] [-dymd] [-dy] [--offset OFFSET] [-e EXTENSIONS] [--process PROCESS_CMD]
-                                    [--version] [--verbose] [-p PROVIDER] [--limit LIMIT]
+usage: PO.DAAC bulk-data downloader [-h] -c COLLECTION -d OUTPUTDIRECTORY [--cycle SEARCH_CYCLES] [-sd STARTDATE] [-ed ENDDATE] [-f] [-b BBOX] [-dc] [-dydoy] [-dymd] [-dy] [--offset OFFSET] [-e EXTENSIONS] [-gr GRANULENAME] [--process PROCESS_CMD] [--version] [--verbose]
+                                    [-p PROVIDER] [--limit LIMIT] [--dry-run]
 ```
 
 To run the script, the following parameters are required:
@@ -120,6 +118,21 @@ machine urs.earthdata.nasa.gov
 **If the script cannot find the netrc file, you will be prompted to enter the username and password and the script wont be able to generate the CMR token**
 
 ## Advanced Usage
+
+### Download data by filename
+
+If you're aware of a file you want to download, you can use the `-gr` option to download by a filename. The `-c` (COLLECTION) and `-d` (directory) options are still required.
+
+The `-gr` option works by taking the file name, removing the suffix and searching for a CMR entry called the granuleUR. Some examples of this include:
+
+| Collection | Filename      | CMR GranuleUR |
+| --- | ----------- | ----------- |
+| MUR25-JPL-L4-GLOB-v04.2  | 20221206090000-JPL-L4_GHRSST-SSTfnd-MUR25-GLOB-v02.0-fv04.2.nc      | 20221206090000-JPL-L4_GHRSST-SSTfnd-MUR25-GLOB-v02.0-fv04.2       |
+| JASON_CS_S6A_L2_ALT_HR_STD_OST_NRT_F | S6A_P4_2__HR_STD__NR_077_039_20221212T181728_20221212T182728_F07.nc   | S6A_P4_2__HR_STD__NR_077_039_20221212T181728_20221212T182728_F07        |
+
+Because of this behavior, granules without data suffixes and granules where the the UR does not directly follow this convention may not work as anticipated. We will be adding the ability to download by granuleUR in a future enhancement.
+
+The -gr option supports wildcard search patterns (using `?` for single- and `*` for multi-character expansion) to select and download multiple granules based on the filename pattern. This feature is supported through wildcard search functionality provided through CMR, which is described in the [CMR Search API documentation](https://cmr.earthdata.nasa.gov/search/site/docs/search/api.html#parameter-options).
 
 ### Download data by cycle
 
@@ -199,22 +212,34 @@ podaac-data-downloader -c VIIRS_N20-OSPO-L2P-v2.61 -d ./data -b="-180,-90,180,90
 
 ### Setting extensions
 
-Some collections have many files. To download a specific set of files, you can set the extensions on which downloads are filtered. By default, ".nc", ".h5", and ".zip" files are downloaded by default.
+Some collections have many files. To download a specific set of files, you can set the extensions on which downloads are filtered. By default, ".nc", ".h5", and ".zip" files are downloaded by default. The `-e` option is a regular expression check so you can do advanced things like `-e PTM_\\d+` to match `PTM_` followed by one or more digits- useful when the ending of a file has no suffix and has a number (1-12 for PTM, in this example)
 
 ```
 -e EXTENSIONS, --extensions EXTENSIONS
-                       The extensions of products to download. Default is [.nc, .h5, .zip]
+                      Regexps of extensions of products to download. Default is [.nc, .h5, .zip, .tar.gz, .tiff]
 ```
 
 An example of the -e usage- note the -e option is additive:
 ```
 podaac-data-subscriber -c VIIRS_N20-OSPO-L2P-v2.61 -d ./data -e .nc -e .h5 -sd 2020-06-01T00:46:02Z -ed 2020-07-01T00:46:02Z
 ```
+
+One may also specify a regular expression to select files. For example, the following are equivalent:
+
+`podaac-data-subscriber -c VIIRS_N20-OSPO-L2P-v2.61 -d ./data -e PTM_1, -e PTM_2, ...,  -e PMT_10 -sd 2020-06-01T00:46:02Z -ed 2020-07-01T00:46:02Z`
+
+and
+
+`podaac-data-subscriber -c VIIRS_N20-OSPO-L2P-v2.61 -d ./data -e PTM_\\d+ -sd 2020-06-01T00:46:02Z -ed 2020-07-01T00:46:02Z`
+
+
 ### run a post download process
 
 Using the `--process` option, you can run a simple command agaisnt the "just" downloaded file. This will take the format of "<command> <path/to/file>". This means you can run a command like `--process gzip` to gzip all downloaded files. We do not support more advanced processes at this time (piping, running a process on a directory, etc).
 
+### Granule subsetting
 
+To enable granule subsetting, include the `--subset` flag in your request. This will invoke the NASA Harmony API to subset the granules in the specified collection. The collection must have subsetting enabled for this feature to function. If it does not, the data will be downloaded normally. 
 
 ### In need of Help?
 The PO.DAAC User Services Office is the primary point of contact for answering your questions concerning data and information held by the PO.DAAC. User Services staff members are knowledgeable about both the data ordering system and the data products themselves. We answer questions about data, route requests to other DAACs, and direct questions we cannot answer to the appropriate information source.

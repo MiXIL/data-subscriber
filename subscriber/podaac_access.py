@@ -1,31 +1,39 @@
 import json
 import logging
 import netrc
-import subprocess
-from datetime import datetime
+import re
 from http.cookiejar import CookieJar
+import os
 from os import makedirs
-from os.path import isdir, basename, join, splitext
-from urllib import request
+from os.path import isdir, basename, join, splitext, isfile
 from typing import Dict
 from urllib import request
 from urllib.error import HTTPError
+from urllib.request import urlretrieve
 import subprocess
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import hashlib
-
-import requests
+import time
+from requests.auth import HTTPBasicAuth
+import harmony
+import concurrent.futures
+from dateutil.parser import *
+import functools
+from packaging import version
 
 import requests
 import tenacity
 from datetime import datetime
 
-__version__ = "1.10.2"
-extensions = [".nc", ".h5", ".zip", ".tar.gz"]
+__version__ = "1.15.2"
+extensions = ["\\.nc", "\\.h5", "\\.zip", "\\.tar.gz", "\\.tiff"]
 edl = "urs.earthdata.nasa.gov"
 cmr = "cmr.earthdata.nasa.gov"
-token_url = "https://" + cmr + "/legacy-services/rest/tokens"
+graph = "graphql.earthdata.nasa.gov"
+graph_url = "https://"+graph+"/api"
+token_url = "https://" + edl + "/api/users"
+
 
 IPAddr = "127.0.0.1"  # socket.gethostbyname(hostname)
 
@@ -85,47 +93,87 @@ def setup_earthdata_login_auth(endpoint):
     request.install_opener(opener)
 
 
+
+def get_token(url: str) -> str:
+    tokens = list_tokens(url)
+    if len(tokens) == 0 :
+        return create_token(url)
+    else:
+        return tokens[0]
+
 ###############################################################################
 # GET TOKEN FROM CMR
 ###############################################################################
-def get_token(url: str, client_id: str, endpoint: str) -> str:
+@tenacity.retry(wait=tenacity.wait_random_exponential(multiplier=1, max=60),
+                stop=tenacity.stop_after_attempt(3),
+                reraise=True,
+                retry=(tenacity.retry_if_result(lambda x: x == ''))
+                )
+def create_token(url: str) -> str:
     try:
         token: str = ''
-        username, _, password = netrc.netrc().authenticators(endpoint)
-        xml: str = """<?xml version='1.0' encoding='utf-8'?>
-        <token><username>{}</username><password>{}</password><client_id>{}</client_id>
-        <user_ip_address>{}</user_ip_address></token>""".format(username, password, client_id, IPAddr)  # noqa E501
-        headers: Dict = {'Content-Type': 'application/xml', 'Accept': 'application/json'}  # noqa E501
-        resp = requests.post(url, headers=headers, data=xml)
-        response_content: Dict = json.loads(resp.content)
-        token = response_content['token']['id']
+        username, _, password = netrc.netrc().authenticators(edl)
+        headers: Dict = {'Accept': 'application/json'}  # noqa E501
 
-    # What error is thrown here? Value Error? Request Errors?
+
+        resp = requests.post(url+"/token", headers=headers, auth=HTTPBasicAuth(username, password))
+        response_content: Dict = json.loads(resp.content)
+        if "error" in response_content:
+            if response_content["error"] == "max_token_limit":
+                logging.error("Max tokens acquired from URS. Using existing token")
+                tokens=list_tokens(url)
+                return tokens[0]
+        token = response_content['access_token']
+
+    # Add better error handling there
+    # Max tokens
+    # Wrong Username/Passsword
+    # Other
     except:  # noqa E722
-        logging.warning("Error getting the token - check user name and password")
+        logging.warning("Error getting the token - check user name and password", exc_info=True)
     return token
 
 
 ###############################################################################
 # DELETE TOKEN FROM CMR
 ###############################################################################
-def delete_token(url: str, token: str) -> None:
+def delete_token(url: str, token: str) -> bool:
     try:
-        headers: Dict = {'Content-Type': 'application/xml', 'Accept': 'application/json'}  # noqa E501
-        url = '{}/{}'.format(url, token)
-        resp = requests.request('DELETE', url, headers=headers)
-        if resp.status_code == 204:
-            logging.info("CMR token successfully deleted")
+        username, _, password = netrc.netrc().authenticators(edl)
+        headers: Dict = {'Accept': 'application/json'}
+        resp = requests.post(url+"/revoke_token",params={"token":token}, headers=headers, auth=HTTPBasicAuth(username, password))
+
+        if resp.status_code == 200:
+            logging.info("EDL token successfully deleted")
+            return True
         else:
-            logging.info("CMR token deleting failed.")
+            logging.info("EDL token deleting failed.")
+
     except:  # noqa E722
-        logging.warning("Error deleting the token")
+        logging.warning("Error deleting the token", exc_info=True)
+
+    return False
+
+def list_tokens(url: str):
+    try:
+        tokens = []
+        username, _, password = netrc.netrc().authenticators(edl)
+        headers: Dict = {'Accept': 'application/json'}  # noqa E501
+        resp = requests.get(url+"/tokens", headers=headers, auth=HTTPBasicAuth(username, password))
+        response_content = json.loads(resp.content)
+
+        for x in response_content:
+            tokens.append(x['access_token'])
+
+    except:  # noqa E722
+        logging.warning("Error getting the token - check user name and password", exc_info=True)
+    return tokens
 
 
-def refresh_token(old_token: str, client_id: str):
+def refresh_token(old_token: str):
     setup_earthdata_login_auth(edl)
-    delete_token(token_url, old_token)
-    return get_token(token_url, client_id, edl)
+    delete_token(token_url,old_token)
+    return get_token(token_url)
 
 
 def validate(args):
@@ -134,12 +182,15 @@ def validate(args):
         if len(bounds) != 4:
             raise ValueError(
                 "Error parsing '--bounds': " + args.bbox + ". Format is W Longitude,S Latitude,E Longitude,N Latitude without spaces ")  # noqa E501
-        for b in bounds:
-            try:
-                float(b)
-            except ValueError:
-                raise ValueError(
-                    "Error parsing '--bounds': " + args.bbox + ". Format is W Longitude,S Latitude,E Longitude,N Latitude without spaces ")  # noqa E501
+        try:
+            num_bounds = [float(b) for b in bounds]
+        except ValueError:
+            raise ValueError(
+                "Error parsing '--bounds': " + args.bbox + ". Format is W Longitude,S Latitude,E Longitude,N Latitude without spaces ")  # noqa E501
+
+        if num_bounds[1] > num_bounds[3]:
+            raise ValueError('Error parsing "--bounds": S Latitude must be <= N Latitude')
+
 
     if args.startDate:
         try:
@@ -169,6 +220,14 @@ def validate(args):
         raise ValueError('Too many output directory flags specified, '
                          'Please specify exactly one flag '
                          'from -dc, -dy, -dydoy, or -dymd')
+
+    if args.subset and args.bbox:
+        bounds = list(map(float, args.bbox.split(',')))
+        if bounds[0] > bounds[2]:
+            raise ValueError(
+                'Subsetting over the international dateline is not currently supported. '
+                'Please provide a valid bbox and try again.'
+            )
 
 
 def check_dir(path):
@@ -286,6 +345,28 @@ def get_temporal_range(start, end, now):
     raise ValueError("One of start-date or end-date must be specified.")
 
 
+def download_file(remote_file, output_path, retries=3):
+    failed = False
+    for r in range(retries):
+        try:
+            urlretrieve(remote_file, output_path)
+        except HTTPError as e:
+            if e.code == 503:
+                logging.warning(f'Error downloading {remote_file}. Retrying download.')
+                # back off on sleep time each error...
+                time.sleep(r)
+                # range is exclusive, so range(3): 0,1,2 so retries will
+                # never be >= 3; need to subtract 1 (doh)
+                if r >= retries-1:
+                    failed = True
+        else:
+            #downlaoded fie without 503
+            break
+
+        if failed:
+            raise Exception("Could not download file.")
+
+
 # Retry using random exponential backoff if a 500 error is raised. Maximum 10 attempts.
 @tenacity.retry(wait=tenacity.wait_random_exponential(multiplier=1, max=60),
                 stop=tenacity.stop_after_attempt(10),
@@ -352,7 +433,7 @@ def parse_cycles(results):
     return cycles
 
 
-def extract_checksums(granule_results):
+def extract_checksums(granules):
     """
     Create a dictionary containing checksum information from files.
 
@@ -380,7 +461,7 @@ def extract_checksums(granule_results):
     }
     """
     checksums = {}
-    for granule in granule_results["items"]:
+    for granule in granules:
         try:
             items = granule["umm"]["DataGranule"]["ArchiveAndDistributionInformation"]
             for item in items:
@@ -436,3 +517,409 @@ def make_checksum(file_path, algorithm):
         for chunk in iter(lambda: f.read(4096), b""):
             hash_alg.update(chunk)
     return hash_alg.hexdigest()
+
+def get_cmr_collections(params, verbose=False):
+    query = urlencode(params)
+    url = "https://" + cmr + "/search/collections.umm_json?" + query
+    if verbose:
+        logging.info(url)
+
+    # Build the request, add the search after header to it if it's not None (e.g. after the first iteration)
+    req = Request(url)
+    response = urlopen(req)
+    result = json.loads(response.read().decode())
+    return result
+
+
+def get_cmr_collection_id(collection_short_name, provider, token, verbose):
+    """
+    Retrieve collection ID from CMR given the collection short name and provider
+
+    Parameters
+    ----------
+    collection_short_name: str
+        The name of the collection
+    provider: str
+        The collection provider
+    token: str
+        The EDL token used to query CMR
+    verbose: bool
+        If true, print extra messages to stdout
+
+    Returns
+    -------
+    str
+        CMR collection concept ID
+
+    Raises
+    ------
+    ValueError
+        If no collection in CMR match the given short name and provider
+    """
+    params = {
+        'provider': provider,
+        'ShortName': collection_short_name,
+        'token': token
+    }
+    collections = get_cmr_collections(params, verbose)['items']
+
+    if not collections:
+        raise ValueError(f'No collections found in CMR for {collection_short_name}/{provider}')
+    return collections[0]['meta']['concept-id']
+
+
+def create_citation(collection_json, access_date):
+    citation_template = "{creator}. {year}. {title}. Ver. {version}. PO.DAAC, CA, USA. Dataset accessed {access_date} at {doi_authority}/{doi}"
+
+    # Better error handling here may be needed...
+    doi = collection_json['DOI']["DOI"]
+    doi_authority = collection_json['DOI']["Authority"]
+    citation = collection_json["CollectionCitations"][0]
+    creator = citation["Creator"]
+    release_date = citation["ReleaseDate"]
+    title = citation["Title"]
+    version = citation["Version"]
+    year = datetime.strptime(release_date, "%Y-%m-%dT%H:%M:%S.000Z").year
+    return citation_template.format(creator=creator, year=year, title=title, version=version, doi_authority=doi_authority, doi=doi, access_date=access_date)
+
+def search_extension(extension, filename):
+    if re.search(extension + "$", filename) is not None:
+        return True
+    return False
+
+def create_citation_file(short_name, provider, data_path, token=None, verbose=False):
+    # get collection umm-c METADATA
+    params = [
+        ('provider', provider),
+        ('ShortName', short_name)
+    ]
+    if token is not None:
+        params.append(('token', token))
+
+    collection = get_cmr_collections(params, verbose)['items'][0]
+
+    access_date = datetime.now().strftime("%Y-%m-%d")
+
+    # create citation from umm-c metadata
+    citation = create_citation(collection['umm'], access_date)
+    # write file
+
+    with open(data_path + "/" + short_name + ".citation.txt", "w") as text_file:
+        text_file.write(citation)
+
+
+def get_latest_release():
+    github_url = "https://api.github.com/repos/podaac/data-subscriber/releases"
+    headers = {}
+    ghtoken = os.environ.get('GITHUB_TOKEN', None)
+    if ghtoken is not None:
+        headers = {"Authorization": "Bearer " + ghtoken}
+
+    releases_json = requests.get(github_url, headers=headers).json()
+    latest_release = get_latest_release_from_json(releases_json)
+    return latest_release
+
+def release_is_current(latest_release, this_version):
+    return  not (version.parse(this_version) < version.parse(latest_release))
+
+def get_latest_release_from_json(releases_json):
+    releases = []
+    for x in releases_json:
+        releases.append(x['tag_name'])
+    sorted(releases, key=lambda x: version.Version(x)).reverse()
+    return releases[0]
+
+
+def check_for_latest():
+    try:
+        latest_version = get_latest_release()
+        if not release_is_current(latest_version,__version__):
+            print(f'You are currently using version {__version__} of the PO.DAAC Data Subscriber/Downloader. Please run:\n\n pip install podaac-data-subscriber --upgrade \n\n to upgrade to the latest version.')
+    except:
+        print("Error checking for new version of the po.daac data subscriber. Continuing")
+
+
+def is_collection_harmony_subsettable(concept_id, token=None):
+    """
+    Function to determine if a collection has an applicable harmony
+    subsetter. This is accomplished by querying the CMR GraphQL API and
+    looking for the expected UMM-S association.
+
+    Parameters
+    ----------
+    concept_id: str
+        The CMR collection concept ID to search for
+    token: str
+        EDL token used to query CMR
+
+    Returns
+    -------
+    bool
+        True if the collection is Harmony subsettable
+    """
+    graph_query_template = '''
+    query Collection {
+      collection(conceptId: "$TEMPLATE_CONCEPT_ID") {
+        services{
+          items {
+            name
+            serviceKeywords
+            type
+          }
+        }
+      }
+    }
+    '''
+    query = graph_query_template.replace('$TEMPLATE_CONCEPT_ID', concept_id)
+    headers = {}
+    if token:
+        headers = {'Authorization': 'Bearer ' + token}
+    r = requests.post(graph_url, json={'query': query}, headers=headers, timeout=(10, 60))
+    collection_services = r.json()['data']['collection']['services']['items']
+    harmony_subsetter = False
+    if collection_services is None:
+        return False
+    for svc in collection_services:
+        if svc['type'] == 'Harmony':
+            for kw in svc['serviceKeywords']:
+                if kw['serviceTerm'] == 'SUBSETTING/SUPERSETTING':
+                    harmony_subsetter = True
+
+    return harmony_subsetter
+
+
+def get_harmony_file(data_dir):
+    """
+    Get Harmony statefile absolute path
+
+    Parameters
+    ----------
+    data_dir: str
+        Path to data download location
+    Returns
+    -------
+    str or None
+        If there is a Harmony statefile in the provided location,
+        return the path to the file. Otherwise, return None.
+    """
+    if isfile(data_dir + '/.harmony'):
+        return data_dir + '/.harmony'
+    return None
+
+
+def find_harmony_runs(collection, bbox, starttime, endtime, output_dir, granules=None):
+    """
+    Look for run in Harmony statefile
+
+    Parameters
+    ----------
+    collection: str
+        CMR collection ID
+    bbox: str
+        bbox string
+    starttime: str
+        Harmony request start time
+    endtime: str
+        Harmony request end time
+    output_dir: str
+        Where to download files
+    granules: list
+        Optional. List of granules provided in Harmony request
+
+    Returns
+    --------
+    str or None
+        If an existing job is found, the job ID will be returned.
+        Otherwise, return None.
+    """
+    harmony_file = get_harmony_file(output_dir)
+    if harmony_file is None:
+        return None
+    try:
+        with open(harmony_file, 'r') as f:
+            harmony_json = json.load(f)
+            for x in harmony_json:
+                if x['collection_id'] == collection and x['starttime'] == starttime and x[
+                     'endtime'] == endtime and x['bbox'] == bbox and x['granules'] == granules:
+                    return x['jobid']
+    except FileNotFoundError:
+        logging.warning('No .harmony file in the data directory. (Is this the first run?)')
+    return None
+
+
+def remove_harmony_run(job_id, output_dir):
+    """
+    In the event we need to delete a Harmony run from the save file,
+    this method can do that using a jobID. This might be used in the
+    case of Harmony failures.
+
+    Parameters
+    ----------
+    job_id: str
+        Harmony job ID
+    output_dir: str
+        Location of downloaded Harmony statefile
+    """
+    harmony_file = get_harmony_file(output_dir)
+    harmony_json = []
+    if harmony_file:
+        with open(harmony_file, 'r') as f:
+            harmony_json = json.load(f)
+    harmony_json = [x for x in harmony_json if x['jobid'] != job_id]
+
+    with open(output_dir + '/.harmony', 'w') as outfile:
+        json.dump(harmony_json, outfile)
+
+
+def save_harmony_run(collection, bbox, starttime, endtime, job_id, output_dir, granule_ids=None):
+    """
+    Save Harmony run to Harmony statefile
+
+    Parameters
+    ----------
+    collection: str
+        CMR collection ID
+    bbox: str
+        Harmony request bbox
+    starttime: str
+        Harmony request start time
+    endtime: str
+        Harmony request end time
+    job_id: str
+        Harmony job ID
+    output_dir: str
+        Harmony statefile location
+    granule_ids: list or None
+        None or list of granule IDs used in Harmony request
+    """
+    harmony_file = get_harmony_file(output_dir)
+    harmony_json = []
+    if harmony_file:
+        f = open(harmony_file, 'r')
+        harmony_json = json.load(f)
+        f.close()
+    harmony_run = {
+        'collection_id': collection,
+        'starttime': starttime,
+        'endtime': endtime,
+        'bbox': bbox,
+        'jobid': job_id,
+        'granules': granule_ids
+    }
+    harmony_json.append(harmony_run)
+
+    with open(output_dir + '/.harmony', 'w') as outfile:
+        json.dump(harmony_json, outfile)
+
+
+# Function to utilize Harmony for subsetting a collection
+def subset(concept_id, bbox, start_time, stop_time, granules=None, verbose=False):
+    """
+    Submit Harmony subset request
+
+    Parameters
+    ----------
+    concept_id: str
+        CMR collection concept ID
+    bbox: str
+        Spatial bounds to use in Harmony subset request
+    start_time: str
+        Lower temporal bound to use in Harmony subset request
+    stop_time: str
+        Upper temporal bound to use in Harmony subset request
+    granules: list or None
+        Optional. List of granules to explicitly provide to Harmony.
+        If no list is provided, spatiotemporal bounds will be used to
+        find valid granules in collection.
+    verbose: boolean
+        Optional. Default False. If True, log Harmony job details.
+
+    Returns
+    -------
+    str
+        Harmony job ID (uuid)
+
+    """
+    harmony_client = harmony.Client()
+    collection = harmony.Collection(id=concept_id)
+    harmony_args = dict(
+        collection=collection,
+        skip_preview=True,
+        granule_id=granules,
+        ignore_errors=True,
+        temporal={}
+    )
+
+    if bbox:
+        bbox_list = [float(bound) for bound in bbox.split(',')]
+        harmony_args['spatial'] = harmony.BBox(
+            bbox_list[0], bbox_list[1], bbox_list[2], bbox_list[3]
+        )
+    if start_time:
+        harmony_args['temporal']['start'] = isoparse(start_time)
+    if stop_time:
+        harmony_args['temporal']['stop'] = isoparse(stop_time)
+    if verbose:
+        logging.info(f'Submitting Harmony subsetting job with parameters {harmony_args}')
+
+    harmony_request = harmony.Request(**harmony_args)
+    harmony_request.is_valid()
+    job_id = harmony_client.submit(harmony_request)
+    return job_id
+
+
+def download_callback(process_cmd, args, future):
+    """
+    Callback which is called upon each granule after successfully
+    downloaded
+
+    Parameters
+    ----------
+    process_cmd: str
+        Command to run on each granule after successful download
+    args: argparse.Namespace
+        Script args
+    future: asyncio.Future
+        Future to extract result (download location) from when complete
+    """
+    process_file(process_cmd, future.result(), args)
+
+
+def download_subsetted_files(job_id, output_dir, args, force_download=False, process_cmd=None):
+    """
+    Download Harmony results locally
+
+    Parameters
+    ----------
+    job_id: str
+    output_dir: str
+    args: argparse.Namespace
+    force_download: bool
+    process_cmd: str
+
+    Returns
+    -------
+    str
+        Harmony job status. Will be one of:
+        - failed
+        - canceled
+        - paused
+        - complete_with_errors
+        - successful
+        - running_with_errors
+    """
+    harmony_client = harmony.Client()
+    try:
+        harmony_iterator = harmony_client.iterator(job_id, output_dir, force_download)
+        futures = list(map(lambda x: x['path'], harmony_iterator))
+        for future in futures:
+            future.add_done_callback(
+                functools.partial(download_callback, process_cmd, args)
+            )
+        (done_futures, _) = concurrent.futures.wait(futures)
+    except Exception as e:
+        logging.error(f'Error processing harmony subsetting request: {e}')
+        logging.error(f'Removing job id [{job_id}] from harmony statefile {output_dir}/.harmony')
+        remove_harmony_run(job_id, output_dir)
+    return harmony_client.status(job_id)
+    # If an error occurs, should we "retry" it? Should we remove this from the .harmony file?
